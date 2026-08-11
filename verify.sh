@@ -30,6 +30,7 @@ check_value "$FABLE_DIR/agents/researcher.md" "model: claude-opus-5" "researcher
 check_value "$FABLE_DIR/agents/researcher.md" "effort: xhigh" "researcher effort xhigh"
 check_value "$FABLE_DIR/agents/executor.md" "effort: high" "executor effort high"
 check_value "$FABLE_DIR/agents/explainer.md" "model: claude-sonnet-5" "explainer uses Sonnet 5"
+check_value "$FABLE_DIR/agents/explainer.md" "Use proactively for non-trivial explanation-first requests" "explainer routing is proactive"
 check_value "$FABLE_DIR/agents/runner.md" "model: claude-haiku-4-5-20251001" "runner uses Haiku"
 check_value "$HOME/.claude/settings.json" "orchestration-gate.py" "gate registered in settings"
 if [ -f "$FABLE_DIR/shell-rc-path" ]; then
