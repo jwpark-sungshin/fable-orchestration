@@ -1,0 +1,17 @@
+{
+  "theme": "dark",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/true"
+          }
+        ]
+      }
+    ]
+  }
+}
+
