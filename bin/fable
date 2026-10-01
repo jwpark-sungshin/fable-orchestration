@@ -1,191 +1,102 @@
 #!/usr/bin/env bash
+# Fable orchestration toggle.
 
 set -u
 
 FABLE_DIR="$HOME/.claude/fable"
-STATE="$HOME/.claude/.fable-state"
+AGENT_DIR="$HOME/.claude/agents"
+STATE_FILE="$HOME/.claude/.fable-state"
 
-run_claude() {
-  if [ "$(cat "$STATE" 2>/dev/null || echo off)" != "on" ]; then
-    command claude "$@"
-    return
-  fi
+AGENTS=(executor explainer researcher runner)
+LEGACY_AGENTS=(deep-reasoner research-executor)
 
-  case "${1:-}" in
-    update|install|doctor|mcp|plugin|agents)
-      command claude "$@"
-      return
-      ;;
-  esac
+# Managed links are relative (../fable/agents/X.md); older installs used
+# absolute links, which are still recognised.
+_is_managed_agent() {
+  local link="$AGENT_DIR/$1.md" target
 
-  local prompt_file="$FABLE_DIR/fable.md"
-  local -a defaults=(--append-system-prompt-file "$prompt_file")
-  local arg
-  local has_model=0
-  local has_effort=0
+  [ -L "$link" ] || return 1
+  target="$(readlink "$link")"
+  [ "$target" = "../fable/agents/$1.md" ] \
+    || [ "$target" = "$FABLE_DIR/agents/$1.md" ]
+}
 
-  for arg in "$@"; do
-    case "$arg" in
-      --model|--model=*) has_model=1 ;;
-      --effort|--effort=*) has_effort=1 ;;
-    esac
+_remove_managed_agents() {
+  local name
+
+  for name in "$@"; do
+    if _is_managed_agent "$name"; then
+      unlink "$AGENT_DIR/$name.md"
+    fi
   done
-
-  (( has_model )) || defaults+=(--model claude-fable-5)
-  (( has_effort )) || defaults+=(--effort medium)
-  command claude "${defaults[@]}" "$@"
 }
 
-status_line() {
-  local label="$1"
-  shift
-  if "$@"; then
-    printf '  [OK] %s\n' "$label"
-  else
-    printf '  [--] %s\n' "$label"
-  fi
+_enable_agents() {
+  mkdir -p "$AGENT_DIR"
+  _remove_managed_agents "${LEGACY_AGENTS[@]}"
+
+  local name
+  for name in "${AGENTS[@]}"; do
+    ln -sfn \
+      "../fable/agents/$name.md" \
+      "$AGENT_DIR/$name.md"
+  done
 }
 
-audit_latest() {
-  local latest
-  latest="$({
-    find "$HOME/.claude/projects" -mindepth 2 -maxdepth 2 \
-      -type f -name '*.jsonl' -printf '%T@ %p\n' 2>/dev/null || true
-  } | sort -nr | sed -n '1{s/^[^ ]* //;p}')"
-
-  if [ -z "$latest" ]; then
-    echo "No Claude transcript found." >&2
-    return 1
-  fi
-
-  python3 - "$latest" <<'PY'
-import json
-import os
-import sys
-
-path = sys.argv[1]
-calls = {}
-rows = []
-main_model = None
-main_effort = None
-
-
-def first_key(node, wanted):
-    if isinstance(node, dict):
-        if wanted in node and isinstance(node[wanted], (str, int, float)):
-            return node[wanted]
-        for value in node.values():
-            found = first_key(value, wanted)
-            if found is not None:
-                return found
-    elif isinstance(node, list):
-        for value in node:
-            found = first_key(value, wanted)
-            if found is not None:
-                return found
-    return None
-
-
-with open(path, encoding="utf-8") as handle:
-    for line in handle:
-        try:
-            record = json.loads(line)
-        except ValueError:
-            continue
-
-        message = record.get("message") or {}
-        if message.get("role") == "assistant":
-            main_model = message.get("model") or main_model
-            main_effort = message.get("effort") or record.get("effort") or main_effort
-
-        content = message.get("content") or []
-        if not isinstance(content, list):
-            content = []
-
-        for block in content:
-            if not isinstance(block, dict):
-                continue
-            if block.get("type") == "tool_use" and block.get("name") in ("Agent", "Task"):
-                tool_input = block.get("input") or {}
-                calls[block.get("id")] = tool_input.get("subagent_type", "unknown")
-
-        result = record.get("toolUseResult") or {}
-        resolved = result.get("resolvedModel")
-        if not resolved:
-            continue
-
-        tool_use_id = None
-        for block in content:
-            if isinstance(block, dict) and block.get("type") == "tool_result":
-                tool_use_id = block.get("tool_use_id")
-                break
-
-        agent_type = calls.get(tool_use_id, "unknown")
-        effort = None
-        output_file = result.get("outputFile")
-        if output_file and os.path.isfile(output_file):
-            try:
-                with open(output_file, encoding="utf-8") as agent_output:
-                    for index, output_line in enumerate(agent_output):
-                        if index > 100:
-                            break
-                        try:
-                            output_record = json.loads(output_line)
-                        except ValueError:
-                            continue
-                        effort = first_key(output_record, "effort")
-                        if effort is not None:
-                            break
-            except OSError:
-                pass
-
-        rows.append((agent_type, resolved, effort or "unknown"))
-
-print("Transcript:", path)
-print("Main:", main_model or "unknown", "/", main_effort or "unknown")
-if not rows:
-    print("No completed Agent calls with resolvedModel were found.")
-else:
-    print("Recent subagents:")
-    for agent_type, model, effort in rows[-20:]:
-        print(f"  {agent_type:12} {model:34} effort={effort}")
-PY
+_disable_agents() {
+  _remove_managed_agents "${AGENTS[@]}" "${LEGACY_AGENTS[@]}"
 }
 
 case "${1:-status}" in
-  run)
-    shift
-    run_claude "$@"
-    ;;
   on)
-    echo on > "$STATE"
-    ln -sfn "$FABLE_DIR/fable.md" "$FABLE_DIR/active.md"
-    echo "Fable orchestration ON. Start a new Claude session."
+    echo on > "$STATE_FILE"
+    _enable_agents
+    echo "Fable orchestration is ON. Start a new Claude session to apply it."
     ;;
+
   off)
-    echo off > "$STATE"
-    ln -sfn "$FABLE_DIR/empty.md" "$FABLE_DIR/active.md"
-    echo "Fable orchestration OFF. Start a new Claude session."
+    echo off > "$STATE_FILE"
+    _disable_agents
+    echo "Fable orchestration is OFF. New Claude sessions will use normal mode."
     ;;
+
   status)
-    current="$(cat "$STATE" 2>/dev/null || echo off)"
-    echo "Fable orchestration: ${current^^}"
-    status_line "POSIX-like shell wrapper" test -f "$FABLE_DIR/env.sh"
-    status_line "main-only prompt injection" grep -q -- '--append-system-prompt-file' "$HOME/.local/bin/fable"
-    for agent in researcher executor explainer runner; do
-      status_line "agent: $agent" test -e "$HOME/.claude/agents/$agent.md"
-    done
-    status_line "orchestration gate" grep -q 'orchestration-gate.py' "$HOME/.claude/settings.json"
-    status_line "gate executable" test -x "$FABLE_DIR/hooks/orchestration-gate.py"
-    if grep -q 'fable/active.md' "$HOME/.claude/CLAUDE.md" 2>/dev/null; then
-      echo "  [WARN] Remove the fable/active.md import from ~/.claude/CLAUDE.md."
+    state=$(cat "$STATE_FILE" 2>/dev/null || echo off)
+    echo "Fable orchestration: ${state^^}"
+
+    grep -q 'fable/env.sh' "$HOME/.bashrc" 2>/dev/null \
+      && ok='[OK]' || ok='[--]'
+    echo "  $ok shell wrapper"
+
+    grep -q 'append-system-prompt-file' "$FABLE_DIR/env.sh" 2>/dev/null \
+      && ok='[OK]' || ok='[--]'
+    echo "  $ok main-only prompt injection"
+
+    if [ "$state" = "on" ]; then
+      for name in "${AGENTS[@]}"; do
+        if _is_managed_agent "$name"; then
+          ok='[OK]'
+        else
+          ok='[--]'
+        fi
+
+        echo "  $ok agent: $name"
+      done
+    else
+      echo "  [--] agents disabled"
     fi
+
+    grep -q 'orchestration-gate' "$HOME/.claude/settings.json" 2>/dev/null \
+      && ok='[OK]' || ok='[--]'
+    echo "  $ok orchestration gate"
+
+    [ -x "$FABLE_DIR/hooks/orchestration-gate.py" ] \
+      && ok='[OK]' || ok='[--]'
+    echo "  $ok gate executable"
     ;;
-  audit)
-    audit_latest
-    ;;
+
   *)
-    echo "Usage: fable on | off | status | audit | run [claude arguments]" >&2
+    echo "Usage: fable on | off | status" >&2
     exit 1
     ;;
 esac

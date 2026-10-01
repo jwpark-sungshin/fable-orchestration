@@ -10,15 +10,15 @@ tool-heavy work, and non-trivial explanations to the named agents.
   Use for judgment-free command execution, builds, test runs, searches, file
   inspection, status checks, and log collection.
 
-- `explainer` — Sonnet 5, high effort
+- `explainer` — Sonnet 5.5, high effort
   Use proactively for non-trivial explanation-first requests asking why or how
   a concept, system, result, behavior, or piece of code works.
 
-- `executor` — Opus 5, high effort
+- `executor` — Opus 5.5, high effort
   Use for well-scoped implementation, modification, test authoring, failure
   analysis, debugging, refactoring, and code review.
 
-- `researcher` — Opus 5, xhigh effort
+- `researcher` — Opus 5.5, xhigh effort
   Use for research direction, hypothesis comparison, architecture, difficult
   root-cause analysis, or work that interleaves reasoning, implementation,
   experiments, measurement, and interpretation.

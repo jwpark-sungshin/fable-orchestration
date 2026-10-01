@@ -1,72 +1,60 @@
 #!/usr/bin/env python3
-"""Limit direct main-agent code edits while Fable mode is enabled.
+"""Restrict direct tool execution by the main Fable orchestrator."""
 
-This is a workflow guard, not a security sandbox. Subagents are allowed because
-delegation is the intended execution path. Unexpected hook failures fail open so
-a configuration error cannot make Claude Code unusable.
-"""
-
+import fcntl
 import json
 import os
 import re
 import sys
 import time
-import fcntl
 
 LIMIT = 2
 STATE_FILE = os.path.expanduser("~/.claude/.fable-state")
 GATE_STATE_DIR = os.path.expanduser("~/.claude/fable/state")
-CODE_EXTS = {
-    "ts", "tsx", "js", "jsx", "mjs", "cjs", "py", "go", "rs", "java",
-    "kt", "kts", "swift", "c", "h", "cc", "cpp", "hpp", "cs", "rb",
-    "php", "vue", "svelte", "astro", "css", "scss", "sass", "less",
-    "html", "sh", "bash", "zsh", "sql", "lua", "dart", "scala", "ex",
-    "exs", "zig", "ipynb",
+
+CODE_EXTENSIONS = {
+    "ts", "tsx", "js", "jsx", "mjs", "cjs", "py", "go", "rs", "java", "kt",
+    "kts", "swift", "c", "h", "cc", "cpp", "hpp", "cs", "rb", "php", "vue",
+    "svelte", "astro", "css", "scss", "sass", "less", "html", "sh", "bash",
+    "zsh", "sql", "lua", "dart", "scala", "ex", "exs", "zig", "ipynb",
 }
-EXT_RE = "|".join(sorted(CODE_EXTS))
 
 
 def allow():
-    raise SystemExit(0)
+    sys.exit(0)
 
 
 def deny(message):
-    sys.stderr.write(message + "\n")
-    raise SystemExit(2)
+    sys.stderr.write(message)
+    sys.exit(2)
 
 
-def is_code(path):
-    return "." in path and path.rsplit(".", 1)[-1].lower() in CODE_EXTS
+def is_code_file(path):
+    if "." not in path:
+        return False
+    return path.rsplit(".", 1)[-1].lower() in CODE_EXTENSIONS
 
 
-def session_paths(data):
-    session = re.sub(r"[^a-zA-Z0-9-]", "", data.get("session_id", "nosession"))
-    base = os.path.join(GATE_STATE_DIR, session)
-    return base + ".json", base + ".lock"
-
-
-def save_gate(path, gate):
-    temporary = path + ".tmp"
-    with open(temporary, "w", encoding="utf-8") as handle:
-        json.dump(gate, handle)
-    os.replace(temporary, path)
-
-
-def clean_old_state():
+def cleanup_old_state():
     now = time.time()
-    for filename in os.listdir(GATE_STATE_DIR):
-        candidate = os.path.join(GATE_STATE_DIR, filename)
-        try:
-            if now - os.path.getmtime(candidate) > 86400:
-                os.remove(candidate)
-        except OSError:
-            pass
+
+    try:
+        entries = os.scandir(GATE_STATE_DIR)
+    except OSError:
+        return
+
+    with entries:
+        for entry in entries:
+            try:
+                if entry.is_file() and now - entry.stat().st_mtime > 86400:
+                    os.remove(entry.path)
+            except OSError:
+                pass
 
 
 def main():
     try:
-        with open(STATE_FILE, encoding="utf-8") as handle:
-            enabled = handle.read().strip() == "on"
+        enabled = open(STATE_FILE, encoding="utf-8").read().strip() == "on"
     except OSError:
         enabled = False
 
@@ -75,70 +63,83 @@ def main():
 
     data = json.load(sys.stdin)
 
+    # Subagents are the intended execution path and are not restricted.
     if data.get("agent_id") or data.get("agent_type"):
-        allow()
-
-    os.makedirs(GATE_STATE_DIR, exist_ok=True)
-    gate_file, lock_file = session_paths(data)
-
-    if data.get("hook_event_name") == "UserPromptSubmit":
-        with open(lock_file, "a", encoding="utf-8") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            save_gate(gate_file, {"files": []})
-        clean_old_state()
         allow()
 
     tool = data.get("tool_name", "")
     tool_input = data.get("tool_input") or {}
 
     if tool == "Bash":
-        command = tool_input.get("command", "")
-        inplace = re.search(r"\b(sed|perl)\s+[^|;&]*-\w*i", command)
-        redirect = re.search(
-            r"(?:>>?|\btee\b(?:\s+-\w+)*)\s*['\"]?[^\s'\"|;&<>]+\.(?:%s)\b"
-            % EXT_RE,
-            command,
-        )
-        mentions_code = re.search(r"\.(?:%s)\b" % EXT_RE, command)
-        if redirect or (inplace and mentions_code):
-            deny(
-                "[fable gate] The main agent cannot modify code through Bash. "
-                "Delegate engineering to executor, research-grade work to "
-                "researcher, explanations to explainer, or mechanical work to runner."
-            )
-        allow()
-
-    if tool not in ("Edit", "Write", "NotebookEdit", "MultiEdit"):
-        allow()
-
-    path = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
-    if not path or not is_code(path):
-        allow()
-
-    with open(lock_file, "a", encoding="utf-8") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        gate = {"files": []}
-        try:
-            with open(gate_file, encoding="utf-8") as handle:
-                saved = json.load(handle)
-            if isinstance(saved.get("files"), list):
-                gate = saved
-        except (OSError, ValueError):
-            pass
-
-        if path in gate["files"]:
-            allow()
-
-        if len(gate["files"]) < LIMIT:
-            gate["files"].append(path)
-            save_gate(gate_file, gate)
-            allow()
-
         deny(
-            "[fable gate] The main agent already edited %d code files this turn (%s). "
-            "Delegate the attempted change (%s) to a named subagent."
-            % (LIMIT, ", ".join(gate["files"]), path)
+            "[Fable gate] The main orchestrator cannot run Bash directly. "
+            "Delegate commands and inspection to runner, ordinary code work to "
+            "executor, and research-grade work to researcher."
         )
+
+    if tool not in {"Edit", "Write", "NotebookEdit", "MultiEdit"}:
+        allow()
+
+    path = (
+        tool_input.get("file_path")
+        or tool_input.get("notebook_path")
+        or ""
+    )
+
+    if not path or not is_code_file(path):
+        allow()
+
+    # prompt_id requires a recent Claude Code version. Fail open when absent.
+    prompt_id = data.get("prompt_id")
+    if not prompt_id:
+        allow()
+
+    session_id = re.sub(
+        r"[^a-zA-Z0-9-]",
+        "",
+        data.get("session_id", "nosession"),
+    )
+    normalized_path = os.path.realpath(os.path.expanduser(path))
+
+    os.makedirs(GATE_STATE_DIR, exist_ok=True)
+    cleanup_old_state()
+
+    state_path = os.path.join(GATE_STATE_DIR, f"{session_id}.json")
+    blocked_files = []
+
+    with open(state_path, "a+", encoding="utf-8") as state_file:
+        fcntl.flock(state_file.fileno(), fcntl.LOCK_EX)
+        state_file.seek(0)
+
+        try:
+            state = json.load(state_file)
+        except (ValueError, OSError):
+            state = {}
+
+        if state.get("prompt_id") != prompt_id:
+            state = {"prompt_id": prompt_id, "files": []}
+
+        files = state.setdefault("files", [])
+
+        if normalized_path in files:
+            allow()
+
+        if len(files) < LIMIT:
+            files.append(normalized_path)
+            state_file.seek(0)
+            state_file.truncate()
+            json.dump(state, state_file)
+            state_file.flush()
+            allow()
+
+        blocked_files = list(files)
+
+    deny(
+        "[Fable gate] The main orchestrator already edited "
+        f"{LIMIT} code files in this turn: {', '.join(blocked_files)}. "
+        f"Delegate the remaining change ({normalized_path}) to executor or "
+        "researcher."
+    )
 
 
 if __name__ == "__main__":
@@ -147,4 +148,4 @@ if __name__ == "__main__":
     except SystemExit:
         raise
     except Exception:
-        raise SystemExit(0)
+        sys.exit(0)

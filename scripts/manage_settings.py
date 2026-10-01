@@ -4,6 +4,8 @@
 import argparse
 import json
 import os
+import stat
+import tempfile
 
 
 def load_settings(path):
@@ -25,6 +27,32 @@ def is_fable_hook(group, hook_path):
     return False
 
 
+def write_settings(path, settings):
+    # Follow a symlinked settings.json so the link itself survives.
+    target = os.path.realpath(path)
+    directory = os.path.dirname(target)
+    os.makedirs(directory, exist_ok=True)
+    try:
+        mode = stat.S_IMODE(os.stat(target).st_mode)
+    except FileNotFoundError:
+        mode = 0o600
+
+    # mkstemp creates the file with mode 0600 regardless of umask.
+    fd, temporary = tempfile.mkstemp(prefix=".settings.", suffix=".fable.tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(settings, handle, indent=2, ensure_ascii=False)
+            handle.write("\n")
+        os.chmod(temporary, mode)
+        os.replace(temporary, target)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("action", choices=("install", "remove"))
@@ -34,6 +62,8 @@ def main():
 
     settings = load_settings(args.settings_path)
     hooks = settings.setdefault("hooks", {})
+    # UserPromptSubmit is only cleaned up: older installs registered the gate
+    # there, but the current gate reads prompt_id and needs no such entry.
     for event in ("PreToolUse", "UserPromptSubmit"):
         groups = hooks.setdefault(event, [])
         groups[:] = [group for group in groups if not is_fable_hook(group, args.hook_path)]
@@ -45,9 +75,6 @@ def main():
                 "hooks": [{"type": "command", "command": args.hook_path}],
             }
         )
-        hooks["UserPromptSubmit"].append(
-            {"hooks": [{"type": "command", "command": args.hook_path}]}
-        )
 
     for event in ("PreToolUse", "UserPromptSubmit"):
         if not hooks.get(event):
@@ -55,12 +82,7 @@ def main():
     if not hooks:
         settings.pop("hooks", None)
 
-    os.makedirs(os.path.dirname(args.settings_path), exist_ok=True)
-    temporary = args.settings_path + ".fable.tmp"
-    with open(temporary, "w", encoding="utf-8") as handle:
-        json.dump(settings, handle, indent=2, ensure_ascii=False)
-        handle.write("\n")
-    os.replace(temporary, args.settings_path)
+    write_settings(args.settings_path, settings)
 
 
 if __name__ == "__main__":
